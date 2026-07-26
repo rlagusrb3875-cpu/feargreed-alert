@@ -34,6 +34,7 @@ def main():
 
     if alerts:
         send_telegram_alert("\n".join(alerts))
+        print("알람 전송 완료:", alerts)
     else:
         print(f"조건 미충족 - Fear&Greed: {fg_score:.1f} ({fg_rating}), Strength: {strength_score:.1f}")
 
