@@ -11,7 +11,6 @@ def get_feargreed_data():
     }
     response = requests.get(url, headers=headers)
     print(f"상태 코드: {response.status_code}")
-    print(f"응답 내용 앞부분: {response.text[:300]}")
     return response.json()
 
 def send_telegram_alert(message):
@@ -26,17 +25,14 @@ def main():
     fg_rating = data["fear_and_greed"]["rating"]
     strength_score = data["stock_price_strength"]["score"]
 
-    alerts = []
-    if fg_rating.lower() in ["fear", "extreme fear"]:
-        alerts.append(f"🚨 {fg_rating} (점수: {fg_score:.1f})")
-    if strength_score <= 0:
-        alerts.append(f"🚨 Stock Price Strength {strength_score:.1f}% (0% 이하)")
+    message = (
+        f"📊 CNN Fear & Greed Index\n"
+        f"종합: {fg_score:.1f} ({fg_rating})\n"
+        f"Stock Price Strength: {strength_score:.1f}%"
+    )
 
-    if alerts:
-        send_telegram_alert("\n".join(alerts))
-        print("알람 전송 완료:", alerts)
-    else:
-        print(f"조건 미충족 - Fear&Greed: {fg_score:.1f} ({fg_rating}), Strength: {strength_score:.1f}")
+    send_telegram_alert(message)
+    print("전송 완료:", message)
 
 if __name__ == "__main__":
     main()
