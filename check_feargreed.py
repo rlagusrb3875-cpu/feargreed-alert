@@ -27,8 +27,8 @@ def main():
     strength_score = data["stock_price_strength"]["score"]
 
     alerts = []
-    if fg_rating.lower() == "extreme fear":
-        alerts.append(f"🚨 극한의 공포 (점수: {fg_score:.1f})")
+    if fg_rating.lower() in ["fear", "extreme fear"]:
+        alerts.append(f"🚨 {fg_rating} (점수: {fg_score:.1f})")
     if strength_score <= 0:
         alerts.append(f"🚨 Stock Price Strength {strength_score:.1f}% (0% 이하)")
 
