@@ -1,13 +1,12 @@
 """CNN Fear & Greed + 미국 3대 지수 + 원/달러 텔레그램 브리핑.
 
-발송물: 이미지 2장(앨범) + 요약 캡션
-  1) Fear & Greed 카드 : 게이지 · 비교 타일 · 120거래일 추세 · 20거래일 일간 변동
-  2) Markets 카드      : 나스닥 / S&P 500 / 다우 / 원달러 1개월 차트
+발송물: 이미지 2장(앨범) + 요약 캡션  — 디자인: B-2a 딥 인사이트(라이트, 한글)
+  1) 공포·탐욕 카드 : 오늘의 한 줄 · 지수/구간/1년 백분위 · 비교 칩 · 구성 지표 7개 · 6개월 흐름 · 60거래일 분포
+  2) 해외 증시 카드 : 3대 지수 비교(1개월 전=100) · 지수 행(미니차트) · 원/달러 1개월
 발송 시각: 스케줄 실행 시 KST 08:00:00 정각까지 대기 후 발송
 """
 import io
 import json
-import math
 import os
 import sys
 import time
@@ -19,7 +18,9 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
-from matplotlib.patches import Circle, FancyBboxPatch, Wedge
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import FancyBboxPatch, Polygon, Rectangle
+import numpy as np
 import requests
 
 KST = timezone(timedelta(hours=9))
@@ -31,7 +32,7 @@ SEND_AT = (8, 0)       # 발송 시각 KST (시, 분)
 LATE_LIMIT = (9, 0)    # 스케줄 실행이 이 시각 이후 시작되면 발송 안 함(시간 일관성 유지)
 PREP_MIN = 3           # 발송 몇 분 전에 데이터 수집·렌더링 시작
 TREND_DAYS = 120       # F&G 추세 기간(거래일)
-CHANGE_DAYS = 20       # F&G 일간 변동 막대 개수
+STRIP_DAYS = 60        # 심리 분포 띠 기간(거래일)
 MARKETS = [            # (Yahoo 심볼, 이미지 표기, 캡션 표기, 소수 자릿수)
     ("^IXIC", "NASDAQ", "나스닥", 2),
     ("^GSPC", "S&P 500", "S&P500", 2),
@@ -39,48 +40,43 @@ MARKETS = [            # (Yahoo 심볼, 이미지 표기, 캡션 표기, 소수 
     ("KRW=X", "USD / KRW", "원/달러", 2),
 ]
 
-# ───────────────────────────────────────────── 디자인 토큰 (다크)
-W, H = 1080, 1350      # 4:5 세로 (모바일 최적)
+# ───────────────────────────────────────────── 디자인 토큰 (B-2a 딥 인사이트 · 라이트)
+W = 1080
 DPI = 150
-BG = "#0f1216"
-CARD = "#181d24"
-LINE = "#262d37"
-TEXT = "#eceef1"
-SUB = "#9aa3af"
-FAINT = "#69727e"
-
-# F&G 구간 (공포=빨강 ↔ 중립=회색 ↔ 탐욕=파랑, CNN 관례)
+P = dict(bg="#f4f2ed", card="#ffffff", text="#17181a", sub="#5c6370", faint="#9aa0a8",
+         line="#ebe8e1", up="#e0383e", down="#2f6fe0", track="#efede8", ink="#2b2d31")
+IDX_COLOR = {"^IXIC": "#7b5cff", "^GSPC": "#17181a", "^DJI": "#1aa39a"}
+NAMES = {"^IXIC": "나스닥", "^GSPC": "S&P 500", "^DJI": "다우존스", "KRW=X": "원/달러"}
+# 공포(빨강) ↔ 중립(회색) ↔ 탐욕(파랑), CNN 구간 기준
 ZONES = [
-    (0, 25, "EXTREME FEAR", "#e5484d"),
-    (25, 45, "FEAR", "#ef8f86"),
-    (45, 55, "NEUTRAL", "#7b8494"),
-    (55, 75, "GREED", "#7fb0f2"),
-    (75, 100, "EXTREME GREED", "#3b82f6"),
+    (0, 25, "극단적 공포", "#d9363e"),
+    (25, 45, "공포", "#f08c6c"),
+    (45, 55, "중립", "#a3a8b0"),
+    (55, 75, "탐욕", "#6fa5ef"),
+    (75, 100, "극단적 탐욕", "#2f6fe0"),
 ]
-FEAR_C, GREED_C = ZONES[0][3], ZONES[-1][3]
-# 국내 관례: 상승=빨강, 하락=파랑 (지수·환율 카드)
-UP_KR, DOWN_KR = "#f2555a", "#4b8bf5"
-
-RATING_KO = {
-    "extreme fear": "극단적 공포",
-    "fear": "공포",
-    "neutral": "중립",
-    "greed": "탐욕",
-    "extreme greed": "극단적 탐욕",
-}
+COMPONENTS = [  # (CNN 키, 이름, 설명)
+    ("market_momentum_sp500", "시장 모멘텀", "S&P500 vs 125일선"),
+    ("stock_price_strength", "주가 강도", "52주 신고가·신저가"),
+    ("stock_price_breadth", "주가 폭", "상승·하락 거래량"),
+    ("put_call_options", "풋/콜 옵션", "풋·콜 비율"),
+    ("market_volatility_vix", "변동성", "VIX vs 50일 평균"),
+    ("junk_bond_demand", "정크본드 수요", "투기등급 스프레드"),
+    ("safe_haven_demand", "안전자산 수요", "주식 vs 국채 수익률"),
+]
 WEEK_KO = "월화수목금토일"
 
 
 def _pick_font():
     names = {f.name for f in font_manager.fontManager.ttflist}
-    for n in ("Inter", "DejaVu Sans"):
+    for n in ("Noto Sans CJK KR", "Noto Sans CJK JP", "NanumGothic"):
         if n in names:
             return n
-    return "DejaVu Sans"
+    return None
 
 
-FONT = _pick_font()
-plt.rcParams.update({"font.family": FONT, "axes.unicode_minus": False})
+FONT = _pick_font()  # 한글 폰트 없으면 None → 이미지 대신 텍스트 발송
+plt.rcParams.update({"font.family": FONT or "DejaVu Sans", "axes.unicode_minus": False})
 
 
 def zone_of(score):
@@ -176,8 +172,7 @@ def get_markets():
 def fg_metrics(data, hist):
     fg = data["fear_and_greed"]
     score = float(fg["score"])
-    # '전일'은 히스토리 직전 거래일 값 → 일간 변동 차트와 같은 기준
-    # (CNN previous_close 필드는 히스토리와 어긋나는 경우가 있음)
+    # '전일'은 히스토리 직전 거래일 값 (CNN previous_close 필드는 히스토리와 어긋나는 경우가 있음)
     prev = hist[-2][1] if len(hist) >= 2 else fg.get("previous_close")
     refs = [
         ("PREV DAY", "전일", prev),
@@ -185,7 +180,7 @@ def fg_metrics(data, hist):
         ("1 MONTH", "1달", fg.get("previous_1_month")),
         ("1 YEAR", "1년", fg.get("previous_1_year")),
     ]
-    return score, refs
+    return score, [r for r in refs if r[2] is not None]
 
 
 def mkt_metrics(pts):
@@ -193,6 +188,44 @@ def mkt_metrics(pts):
     d1 = (last / pts[-2][1] - 1) * 100
     m1 = (last / pts[0][1] - 1) * 100
     return last, d1, m1
+
+
+def streak(hist):
+    """현재와 같은 큰 구간(공포<45 / 중립 / 탐욕≥55)이 이어진 거래일 수"""
+    def side(v):
+        return 0 if v < 45 else (2 if v >= 55 else 1)
+    s, cur = 0, side(hist[-1][1])
+    for _, v in reversed(hist):
+        if side(v) != cur:
+            break
+        s += 1
+    return s
+
+
+def percentile_1y(hist, score):
+    yr = [v for d, v in hist if d >= hist[-1][0] - timedelta(days=365)]
+    return sum(1 for v in yr if v <= score) / len(yr) * 100, len(yr)
+
+
+def headline(hist, markets, score):
+    zn, _ = zone_of(score)
+    parts = [f"{zn} {streak(hist)}거래일째"]
+    idx = [mkt_metrics(markets[s])[2] for s in ("^IXIC", "^GSPC", "^DJI") if s in markets]
+    if idx:
+        if all(m < 0 for m in idx):
+            parts.append("3대 지수 모두 1개월 하락")
+        elif all(m > 0 for m in idx):
+            parts.append("3대 지수 모두 1개월 상승")
+        else:
+            parts.append("3대 지수 혼조")
+    if "KRW=X" in markets:
+        m = mkt_metrics(markets["KRW=X"])[2]
+        parts.append(f"원화 {'약세' if m > 0 else '강세'}({m:+.1f}%)")
+    return " · ".join(parts)
+
+
+def fmt_num(v, nd=2):
+    return f"{v:,.{nd}f}"
 
 
 # ───────────────────────────────────────────── 그리기 공통
@@ -204,245 +237,260 @@ def px(size):
 class Canvas:
     """좌상단 원점 픽셀 좌표로 배치하는 카드 캔버스."""
 
-    def __init__(self):
-        self.fig = plt.figure(figsize=(W / DPI, H / DPI), dpi=DPI)
-        self.fig.patch.set_facecolor(BG)
+    def __init__(self, h):
+        self.H = h
+        self.fig = plt.figure(figsize=(W / DPI, h / DPI), dpi=DPI)
+        self.fig.patch.set_facecolor(P["bg"])
         self.bg = self.fig.add_axes([0, 0, 1, 1])
         self.bg.set_xlim(0, W)
-        self.bg.set_ylim(H, 0)
+        self.bg.set_ylim(h, 0)
         self.bg.axis("off")
 
-    def text(self, x, y, s, size, color=TEXT, weight="normal", ha="left", va="baseline", **kw):
+    def t(self, x, y, s, size, color, weight="normal", ha="left", va="baseline", **kw):
         return self.bg.text(x, y, s, fontsize=px(size), color=color, fontweight=weight,
                             ha=ha, va=va, **kw)
 
-    def card(self, x, y, w, h, r=26):
-        self.bg.add_patch(FancyBboxPatch((x, y), w, h,
-                                         boxstyle=f"round,pad=0,rounding_size={r}",
-                                         linewidth=0, facecolor=CARD, zorder=0))
+    def box(self, x, y, w, h, color, r=28, z=0):
+        self.bg.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={r}",
+                                         facecolor=color, edgecolor="none", zorder=z))
 
-    def pill(self, x, y, s, size, fg, bg):
-        t = self.text(x, y, s, size, color=fg, weight="bold", ha="center", va="center",
-                      zorder=7)
-        t.set_bbox(dict(boxstyle="round,pad=0.6,rounding_size=0.95", facecolor=bg,
-                        edgecolor="none"))
+    def pill(self, x, y, s, size, fg, bg, ha="left"):
+        tb = self.t(x, y, s, size, fg, "bold", ha=ha, va="center")
+        tb.set_bbox(dict(boxstyle="round,pad=0.45,rounding_size=0.85", facecolor=bg,
+                         edgecolor="none"))
 
-    def axes(self, x, y, w, h):
-        ax = self.fig.add_axes([x / W, 1 - (y + h) / H, w / W, h / H])
-        ax.set_facecolor("none")
-        for s in ax.spines.values():
+    def ax(self, x, y, w, h, tick, size=19):
+        a = self.fig.add_axes([x / W, 1 - (y + h) / self.H, w / W, h / self.H])
+        a.set_facecolor("none")
+        for s in a.spines.values():
             s.set_visible(False)
-        ax.tick_params(colors=SUB, length=0, labelsize=px(22), pad=6)
-        return ax
+        a.tick_params(colors=tick, length=0, labelsize=px(size), pad=5)
+        return a
 
     def png(self):
         buf = io.BytesIO()
-        self.fig.savefig(buf, format="png", dpi=DPI, facecolor=BG)
+        self.fig.savefig(buf, format="png", dpi=DPI, facecolor=P["bg"])
         plt.close(self.fig)
         buf.seek(0)
         return buf
 
 
-def fmt_num(v, nd=2):
-    return f"{v:,.{nd}f}"
+def hbar(c, x, y, w, h, score):
+    """가로 그라데이션 게이지(공포→탐욕) + 현재값 마커"""
+    cmap = LinearSegmentedColormap.from_list("z", [z[3] for z in ZONES])
+    c.bg.imshow(np.linspace(0, 1, 256).reshape(1, -1), extent=[x, x + w, y + h, y], cmap=cmap,
+                aspect="auto", zorder=2)
+    mx = x + w * score / 100
+    c.bg.add_patch(Polygon([[mx - 13, y - 22], [mx + 13, y - 22], [mx, y - 3]], closed=True,
+                           facecolor=P["text"], zorder=4))
+    for v, lab, ha in ((0, "공포", "left"), (50, "중립", "center"), (100, "탐욕", "right")):
+        c.t(x + w * v / 100, y + h + 30, lab, 19, P["sub"], ha=ha)
 
 
-def arrow(v):
-    return "▲" if v > 0 else ("▼" if v < 0 else "–")
-
-
-def header(c, title, sub, right_top, right_sub, M=48):
-    c.text(M, 80, title, 36, weight="bold")
-    c.text(M, 118, sub, 21, color=SUB)
-    c.text(W - M, 80, right_top, 26, weight="bold", ha="right")
-    c.text(W - M, 118, right_sub, 21, color=SUB, ha="right")
-
-
-# ───────────────────────────────────────────── 카드 1: Fear & Greed
-def build_fg_card(data, hist, now_kst):
+# ───────────────────────────────────────────── 카드 1: 공포·탐욕
+def build_fg_card(data, hist, markets, now_kst):
     score, refs = fg_metrics(data, hist)
-    zname, zcolor = zone_of(score)
-    c = Canvas()
-    M = 48
-    header(c, "FEAR & GREED INDEX", "CNN Business  ·  US market sentiment",
-           f"{hist[-1][0]:%b %d, %Y}", "US close")
+    zn, zc = zone_of(score)
+    pct, n = percentile_1y(hist, score)
+    H = 1560
+    c = Canvas(H)
 
-    # ── 게이지
-    c.card(M, 150, W - 2 * M, 392)
-    gx, gy, R, RW = W / 2, 452, 238, 44
-    for lo, hi, _, col in ZONES:
-        active = lo <= score < hi or (hi == 100 and score >= 100)
-        c.bg.add_patch(Wedge((gx, gy), R, -(180 - lo * 1.8 - 0.8), -(180 - hi * 1.8 + 0.8),
-                             width=RW, facecolor=col, alpha=1.0 if active else 0.25,
-                             lw=0, zorder=2))
-    for v in (0, 25, 50, 75, 100):
-        a = math.radians(180 - v * 1.8)
-        rr = R + 24
-        c.text(gx + rr * math.cos(a), gy - rr * math.sin(a) + 2, str(v), 21,
-               color=FAINT, ha="center", va="center")
-    a = math.radians(180 - score * 1.8)
-    rn = R - RW - 12
-    c.bg.plot([gx, gx + rn * math.cos(a)], [gy, gy - rn * math.sin(a)], color=TEXT,
-              lw=3.4, solid_capstyle="round", zorder=4)
-    c.bg.add_patch(Circle((gx, gy), 14, facecolor=TEXT, lw=0, zorder=5))
-    c.bg.add_patch(Circle((gx, gy), 5, facecolor=CARD, lw=0, zorder=6))
-    c.text(gx, gy - 70, f"{score:.1f}", 96, weight="bold", ha="center", zorder=7)
-    c.pill(gx, gy + 52, zname, 22, fg=BG, bg=zcolor)
+    c.t(56, 88, "공포·탐욕 지수", 42, P["text"], "bold")
+    c.t(W - 56, 88, f"{now_kst:%m.%d}({WEEK_KO[now_kst.weekday()]})", 26, P["text"], "bold",
+        ha="right")
+    c.box(40, 116, W - 80, 92, P["ink"], r=24)
+    c.t(72, 172, "오늘의 한 줄", 20, "#c9ccd2", "bold")
+    c.t(220, 172, headline(hist, markets, score), 23, "#ffffff", "bold")
 
-    # ── 비교 타일
-    ty, th, gap = 562, 156, 16
-    tw = (W - 2 * M - 3 * gap) / 4
-    for i, (code, _, ref) in enumerate(refs):
-        x = M + i * (tw + gap)
-        c.card(x, ty, tw, th, r=22)
-        c.text(x + 24, ty + 44, code, 20, color=SUB, weight="bold")
-        if ref is None:
-            c.text(x + 24, ty + 104, "–", 42, weight="bold")
-            continue
+    # 히어로
+    c.box(40, 228, W - 80, 330, P["card"])
+    c.t(80, 372, f"{score:.1f}", 120, P["text"], "bold")
+    c.pill(400, 300, f" {zn} ", 26, "white", zc)
+    c.t(400, 360, f"구간 {streak(hist)}거래일째", 24, P["text"], "bold")
+    c.t(400, 400, f"최근 1년 중 하위 {pct:.0f}%", 24, P["text"], "bold")
+    c.t(640, 400, f"({n}거래일 기준)", 19, P["faint"])
+    hbar(c, 80, 466, W - 160, 22, score)
+
+    # 비교 칩
+    cy = 578
+    cw = (W - 80 - 3 * 14) / 4
+    for i, (_, ko, ref) in enumerate(refs):
+        x = 40 + i * (cw + 14)
         ref = float(ref)
-        diff = score - ref
-        c.bg.add_patch(Circle((x + tw - 28, ty + 38), 8, facecolor=zone_of(ref)[1], lw=0))
-        c.text(x + 24, ty + 104, f"{ref:.1f}", 42, weight="bold")
-        dcol = GREED_C if diff > 0 else (FEAR_C if diff < 0 else SUB)
-        c.text(x + 24, ty + 138, f"{arrow(diff)} {abs(diff):.1f} since", 22, color=dcol,
-               weight="bold")
+        d = score - ref
+        c.box(x, cy, cw, 112, P["card"], r=22)
+        c.t(x + 22, cy + 38, f"{ko} 전", 20, P["sub"])
+        c.t(x + 22, cy + 88, f"{ref:.1f}", 34, P["text"], "bold")
+        c.t(x + cw - 20, cy + 88, f"{d:+.1f}", 21, P["down"] if d > 0 else P["up"], "bold",
+            ha="right")
 
-    # ── 추세
-    cy, chh = 738, 340
-    c.card(M, cy, W - 2 * M, chh)
-    trend = hist[-TREND_DAYS:]
-    c.text(M + 28, cy + 50, "Trend", 24, weight="bold")
-    c.text(M + 112, cy + 50, f"last {len(trend)} sessions", 22, color=SUB)
-    ax = c.axes(M + 70, cy + 76, W - 2 * M - 104, chh - 128)
-    dates = [d for d, _ in trend]
-    vals = [v for _, v in trend]
+    # 구성 지표 7개
+    ky = 710
+    c.box(40, ky, W - 80, 430, P["card"])
+    c.t(80, ky + 56, "구성 지표 7개", 25, P["text"], "bold")
+    comps = [(k, nm, desc, float(data[k]["score"])) for k, nm, desc in COMPONENTS
+             if isinstance(data.get(k), dict) and data[k].get("score") is not None]
+    if comps:
+        weakest = min(comps, key=lambda r: r[3])
+        c.t(W - 80, ky + 56, f"가장 약한 지표: {weakest[1]}", 20, P["sub"], ha="right")
+    else:
+        c.t(80, ky + 120, "세부 지표 데이터 없음", 22, P["faint"])
+    bx, bw = 420, W - 80 - 420 - 90
+    for i, (_, nm, desc, v) in enumerate(comps):
+        y = ky + 100 + i * 46
+        c.t(80, y + 9, nm, 22, P["text"], "bold")
+        c.t(80 + len(nm) * 23 + 14, y + 9, desc, 17, P["faint"])
+        c.box(bx, y - 9, bw, 22, P["track"], r=11)
+        c.box(bx, y - 9, max(bw * v / 100, 22), 22, zone_of(v)[1], r=11, z=1)
+        c.bg.plot([bx + bw / 2, bx + bw / 2], [y - 15, y + 19], color=P["faint"], lw=1, zorder=2)
+        c.t(W - 80, y + 9, f"{v:.0f}", 23, P["text"], "bold", ha="right")
+
+    # 6개월 흐름 + 60거래일 분포
+    ty = 1160
+    c.box(40, ty, W - 80, 370, P["card"])
+    c.t(80, ty + 54, "최근 6개월 흐름", 25, P["text"], "bold")
+    ax = c.ax(110, ty + 76, W - 190, 170, P["sub"], 17)
+    tr = hist[-TREND_DAYS:]
+    ds, vs = [d for d, _ in tr], [v for _, v in tr]
     for lo, hi, _, col in ZONES:
-        ax.axhspan(lo, hi, color=col, alpha=0.09, lw=0, zorder=0)
-    for yv in (25, 45, 55, 75):
-        ax.axhline(yv, color=LINE, lw=0.8, zorder=1)
-    ax.plot(dates, vals, color=TEXT, lw=2.0, zorder=3, solid_joinstyle="round",
-            solid_capstyle="round")
-    ax.scatter([dates[-1]], [vals[-1]], s=80, color=zcolor, edgecolors=CARD,
-               linewidths=2.5, zorder=5)
-    imax = max(range(len(vals)), key=vals.__getitem__)
-    imin = min(range(len(vals)), key=vals.__getitem__)
-    for idx, off, va in ((imax, 9, "bottom"), (imin, -9, "top")):
-        if idx >= len(vals) - 8:  # 현재값 점과 겹침 방지
-            continue
-        ax.annotate(f"{vals[idx]:.0f}", (dates[idx], vals[idx]), xytext=(0, off),
-                    textcoords="offset points", ha="center", va=va, fontsize=px(21),
-                    color=SUB)
+        ax.axhspan(lo, hi, color=col, alpha=0.08, lw=0)
+    ax.plot(ds, vs, color=P["text"], lw=2)
+    ax.scatter([ds[-1]], [vs[-1]], s=70, color=zc, edgecolors="white", linewidths=2.2, zorder=5)
     ax.set_ylim(0, 100)
-    ax.set_xlim(dates[0], dates[-1] + timedelta(days=2))
+    ax.set_xlim(ds[0], ds[-1] + timedelta(days=1))
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.xaxis.set_major_locator(mdates.MonthLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%-m월"))
+    imax = max(range(len(vs)), key=vs.__getitem__)
+    if imax < len(vs) - 8:
+        ax.annotate(f"고점 {vs[imax]:.0f}", (ds[imax], vs[imax]), xytext=(0, 8),
+                    textcoords="offset points", ha="center", va="bottom", fontsize=px(17),
+                    color=P["sub"])
 
-    # ── 일간 변동
-    by, bh = 1094, 216
-    c.card(M, by, W - 2 * M, bh)
-    tail = hist[-(CHANGE_DAYS + 1):]
-    ch_vals = [tail[i + 1][1] - tail[i][1] for i in range(len(tail) - 1)]
-    ch_dates = [d for d, _ in tail[1:]]
-    if not ch_vals:  # 히스토리 1개뿐인 경우
-        ch_vals, ch_dates = [0.0], [hist[-1][0]]
-    c.text(M + 28, by + 46, "Daily change", 24, weight="bold")
-    c.text(M + 222, by + 46, f"last {len(ch_vals)} sessions", 22, color=SUB)
-    c.text(W - M - 28, by + 46, "▼ toward fear", 21, color=FEAR_C, weight="bold", ha="right")
-    c.text(W - M - 210, by + 46, "▲ toward greed", 21, color=GREED_C, weight="bold", ha="right")
-    ax2 = c.axes(M + 28, by + 70, W - 2 * M - 56, bh - 116)
-    ax2.bar(range(len(ch_vals)), ch_vals, width=0.62, zorder=3,
-            color=[GREED_C if v >= 0 else FEAR_C for v in ch_vals])
-    ax2.axhline(0, color=FAINT, lw=1, zorder=4)
-    lim = max(5, max(abs(v) for v in ch_vals) * 1.3)
-    ax2.set_ylim(-lim, lim)
-    ax2.set_yticks([])
-    ax2.set_xlim(-0.6, len(ch_vals) - 0.4)
-    ticks = [i for i in range(len(ch_dates)) if (len(ch_dates) - 1 - i) % 4 == 0]
-    ax2.set_xticks(ticks)
-    ax2.set_xticklabels([ch_dates[i].strftime("%m/%d") for i in ticks])
-    v = ch_vals[-1]
-    ax2.annotate(f"{v:+.1f}", (len(ch_vals) - 1, v), xytext=(-12, 0),
-                 textcoords="offset points", ha="right", va="bottom" if v >= 0 else "top",
-                 fontsize=px(19), color=TEXT, fontweight="bold")
+    last = hist[-STRIP_DAYS:]
+    c.t(80, ty + 300, f"{len(last)}거래일", 18, P["sub"], "bold")
+    sx, sw = 180, (W - 260) / len(last)
+    cnt = {}
+    for i, (_, v) in enumerate(last):
+        nm, col = zone_of(v)
+        cnt[nm] = cnt.get(nm, 0) + 1
+        c.box(sx + i * sw + 1.5, ty + 280, sw - 3, 30, col, r=4)
+    summ = " · ".join(f"{nm} {cnt[nm] / len(last) * 100:.0f}%" for _, _, nm, _ in ZONES if nm in cnt)
+    c.t(180, ty + 345, summ, 18, P["sub"])
 
-    c.text(M, H - 14, f"Source: CNN  ·  {now_kst:%Y-%m-%d %H:%M} KST", 20, color=FAINT)
+    c.t(56, H - 14, "출처 CNN · 구성 지표 막대 중앙선 = 50(중립)", 18, P["faint"])
     return c.png()
 
 
-# ───────────────────────────────────────────── 카드 2: Markets
+# ───────────────────────────────────────────── 카드 2: 해외 증시 · 환율
 def build_market_card(markets, now_kst):
-    c = Canvas()
-    M = 48
-    header(c, "MARKETS", "1 month  ·  daily close", f"{now_kst:%b %d, %Y}", "KST")
+    H = 1350
+    c = Canvas(H)
+    c.t(56, 88, "해외 증시 · 환율", 42, P["text"], "bold")
+    c.t(W - 56, 88, "최근 1개월", 24, P["sub"], ha="right")
 
-    top, bottom, gapy = 150, H - 46, 16
-    n = len(MARKETS)
-    rh = (bottom - top - gapy * (n - 1)) / n
-    for i, (sym, name, _, nd) in enumerate(MARKETS):
-        y = top + i * (rh + gapy)
-        c.card(M, y, W - 2 * M, rh)
-        lx = M + 30
-        c.text(lx, y + 52, name, 22, color=SUB, weight="bold")
+    # 3대 지수 비교 (1개월 전 = 100)
+    c.box(40, 120, W - 80, 470, P["card"])
+    c.t(80, 176, "3대 지수 비교", 25, P["text"], "bold")
+    c.t(W - 80, 176, "1개월 전 = 100", 20, P["faint"], ha="right")
+    ax = c.ax(110, 200, W - 400, 350, P["sub"])
+    ends = []
+    for sym in ("^IXIC", "^GSPC", "^DJI"):
         pts = markets.get(sym)
         if not pts:
-            c.text(lx, y + 120, "No data", 34, color=FAINT, weight="bold")
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] / pts[0][1] * 100 for p in pts]
+        ax.plot(xs, ys, color=IDX_COLOR[sym], lw=2.4)
+        ends.append((ys[-1], sym, xs[-1]))
+    ax.axhline(100, color=P["faint"], lw=1, ls=(0, (3, 3)))
+    ax.grid(axis="y", color=P["line"], lw=1)
+    ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%-m/%-d"))
+    ends.sort(reverse=True)
+    lo, hi = ax.get_ylim()
+    gap, prev = (hi - lo) * 0.11, None
+    for v, sym, xe in ends:  # 끝 라벨 겹침 방지
+        yl = v if prev is None or prev - v >= gap else prev - gap
+        prev = yl
+        ax.annotate(f"{NAMES[sym]} {v - 100:+.1f}%", (xe, v), xytext=(xe + timedelta(days=1.2), yl),
+                    textcoords="data", color=IDX_COLOR[sym], fontsize=px(20), fontweight="bold",
+                    va="center", annotation_clip=False)
+
+    # 지수 행
+    ry = 610
+    c.box(40, ry, W - 80, 300, P["card"])
+    for i, sym in enumerate(("^IXIC", "^GSPC", "^DJI")):
+        y = ry + 60 + i * 92
+        c.bg.add_patch(Rectangle((80, y - 26), 8, 34, facecolor=IDX_COLOR[sym]))
+        c.t(104, y, NAMES[sym], 25, P["text"], "bold")
+        if i < 2:
+            c.bg.plot([80, W - 80], [y + 40, y + 40], color=P["line"], lw=1)
+        pts = markets.get(sym)
+        if not pts:
+            c.t(W - 80, y, "데이터 없음", 24, P["faint"], ha="right")
             continue
         last, d1, m1 = mkt_metrics(pts)
-        col_d = UP_KR if d1 > 0 else (DOWN_KR if d1 < 0 else SUB)
-        col_m = UP_KR if m1 > 0 else (DOWN_KR if m1 < 0 else SUB)
-        c.text(lx, y + 116, fmt_num(last, nd), 44, weight="bold")
-        c.text(lx, y + 162, "1D", 20, color=FAINT, weight="bold")
-        c.text(lx + 44, y + 162, f"{arrow(d1)} {abs(d1):.2f}%", 23, color=col_d, weight="bold")
-        c.text(lx, y + 200, "1M", 20, color=FAINT, weight="bold")
-        c.text(lx + 44, y + 200, f"{arrow(m1)} {abs(m1):.2f}%", 23, color=col_m, weight="bold")
-        asof = pts[-1][0].astimezone(KST) if sym == "KRW=X" else pts[-1][0].astimezone(
-            timezone(timedelta(hours=-5)))
-        c.text(lx, y + rh - 22, f"as of {asof:%m/%d}", 20, color=FAINT)
+        c.t(520, y, fmt_num(last, 2), 28, P["text"], "bold", ha="right")
+        sp = c.ax(550, y - 38, 150, 50, P["sub"])
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        col = P["up"] if m1 > 0 else P["down"]
+        sp.plot(xs, ys, color=col, lw=1.8)
+        sp.axhline(ys[0], color=P["faint"], lw=0.8, ls=(0, (2, 2)))
+        sp.scatter([xs[-1]], [ys[-1]], s=16, color=col, zorder=3)
+        sp.axis("off")
+        c.pill(W - 230, y - 9, f"{'▲' if d1 > 0 else '▼'} {abs(d1):.2f}%", 20, "white",
+               P["up"] if d1 > 0 else P["down"], ha="right")
+        c.t(W - 80, y, f"1M {m1:+.1f}%", 21, P["sub"], ha="right")
 
-        ax = c.axes(M + 340, y + 28, W - 2 * M - 340 - 100, rh - 66)
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        base = ys[0]
-        ax.axhline(base, color=FAINT, lw=1, ls=(0, (3, 3)), zorder=1)
-        ax.fill_between(xs, ys, base, where=[v >= base for v in ys], interpolate=True,
-                        color=UP_KR, alpha=0.14, lw=0, zorder=2)
-        ax.fill_between(xs, ys, base, where=[v < base for v in ys], interpolate=True,
-                        color=DOWN_KR, alpha=0.14, lw=0, zorder=2)
-        ax.plot(xs, ys, color=col_m, lw=2.2, zorder=3, solid_joinstyle="round",
-                solid_capstyle="round")
-        ax.scatter([xs[-1]], [ys[-1]], s=50, color=col_m, edgecolors=CARD, linewidths=2,
-                   zorder=4)
+    # 원/달러
+    x, y, w, h = 40, 930, W - 80, 380
+    c.box(x, y, w, h, P["card"])
+    c.t(x + 40, y + 58, "원/달러 환율", 25, P["text"], "bold")
+    pts = markets.get("KRW=X")
+    if pts:
+        last, d1, m1 = mkt_metrics(pts)
+        c.t(x + w - 40, y + 62, f"{last:,.2f}원", 34, P["text"], "bold", ha="right")
+        c.t(x + 40, y + 102, f"전일 {d1:+.2f}% · 1개월 {m1:+.1f}% → 원화 {'약세' if m1 > 0 else '강세'}",
+            21, P["sub"])
+        ax = c.ax(x + 40, y + 130, w - 170, h - 178, P["faint"], 17)
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        col = P["up"] if m1 > 0 else P["down"]
         lo, hi = min(ys), max(ys)
-        pad = (hi - lo) * 0.14 or abs(hi) * 0.01
+        pad = (hi - lo) * 0.12 or abs(hi) * 0.005
+        ax.plot(xs, ys, color=col, lw=2.4)
+        ax.fill_between(xs, ys, lo - pad, color=col, alpha=0.10, lw=0)
+        ax.axhline(ys[0], color=P["faint"], lw=1, ls=(0, (3, 3)))
         ax.set_ylim(lo - pad, hi + pad)
-        ax.set_xlim(xs[0], xs[-1] + (xs[-1] - xs[0]) * 0.025)  # 끝점 잘림 방지
+        ax.set_xlim(xs[0], xs[-1])
         ax.yaxis.tick_right()
         ax.set_yticks([lo, hi])
-        ax.set_yticklabels([fmt_num(lo, 0), fmt_num(hi, 0)])
-        for yv in (lo, hi):
-            ax.axhline(yv, color=LINE, lw=0.8, zorder=0)
+        ax.set_yticklabels([f"{lo:,.0f}", f"{hi:,.0f}"])
         ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%-m/%-d"))
+    else:
+        c.t(x + 40, y + 120, "데이터 없음", 26, P["faint"])
 
-    c.text(M, H - 14, "Source: Yahoo Finance  ·  KR convention: red ▲ up, blue ▼ down  ·  "
-           "dashed = 1M-ago close", 19, color=FAINT)
+    c.t(56, H - 14, "출처 Yahoo Finance · 빨강 상승 / 파랑 하락 · 미니차트 점선 = 1개월 전", 18,
+        P["faint"])
     return c.png()
 
 
 # ───────────────────────────────────────────── 캡션
 def build_caption(data, hist, markets, now_kst):
     score, refs = fg_metrics(data, hist)
-    rating = RATING_KO.get(str(data["fear_and_greed"]["rating"]).lower(),
-                           data["fear_and_greed"]["rating"])
+    zn, _ = zone_of(score)
+    pct, _ = percentile_1y(hist, score)
     emoji = "😱" if score < 25 else "😨" if score < 45 else "😐" if score < 55 else \
         "😏" if score < 75 else "🤑"
-    cmp_parts = [f"{ko} {score - float(ref):+.1f}" for _, ko, ref in refs if ref is not None]
+    cmp_parts = [f"{ko} {score - float(ref):+.1f}" for _, ko, ref in refs]
     lines = [
         f"📊 <b>마켓 브리핑</b> · {now_kst:%m/%d}({WEEK_KO[now_kst.weekday()]})",
         f"<i>미국 {hist[-1][0]:%m/%d} 종가 기준</i>",
         "",
-        f"{emoji} <b>공포탐욕 {score:.1f}</b> · {rating}",
+        f"💬 {headline(hist, markets, score)}",
+        "",
+        f"{emoji} <b>공포탐욕 {score:.1f}</b> · {zn} · 1년 하위 {pct:.0f}%",
         "    " + " · ".join(cmp_parts),
         "",
     ]
@@ -497,8 +545,11 @@ def build_and_send(now_kst, send_at=None):
     caption = build_caption(data, hist, markets, now_kst)
 
     images = []
-    builders = [("F&G", lambda: build_fg_card(data, hist, now_kst))]
-    if markets:
+    builders = [("F&G", lambda: build_fg_card(data, hist, markets, now_kst))]
+    if not FONT:  # 한글 폰트 없음 → 깨진 이미지 대신 텍스트만
+        print("한글 폰트 없음 → 텍스트 발송", file=sys.stderr)
+        builders = []
+    elif markets:
         builders.append(("Markets", lambda: build_market_card(markets, now_kst)))
     for name, fn in builders:
         try:
