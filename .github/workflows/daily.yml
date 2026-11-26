@@ -1,28 +1,70 @@
 name: Daily Check
 
+# 발송 시각: KST 08:00:00 고정
+# GitHub 스케줄은 수십 분~수 시간 지연될 수 있어 새벽에 여러 번 미리 띄우고,
+# 먼저 시작된 실행이 08:00 정각까지 대기했다가 발송한다.
+# 나머지 실행은 '오늘 발송 완료' 캐시를 보고 종료(중복 발송 방지).
+# UTC 월~금 = KST 화~토 (KST 일·월은 직전 미국장 없음 → 제외)
 on:
   schedule:
-    # 20:30 UTC = 다음날 05:30 KST
-    # UTC 월~금 실행 → KST 화~토 발송 (KST 일·월 = 미국 토·일 미개장 → 제외)
-    - cron: '30 20 * * 1-5'
+    - cron: '7 20 * * 1-5'    # 05:07 KST
+    - cron: '37 20 * * 1-5'   # 05:37 KST
+    - cron: '7 21 * * 1-5'    # 06:07 KST
+    - cron: '7 22 * * 1-5'    # 07:07 KST
   workflow_dispatch:
     inputs:
       force:
-        description: 'KST 일·월요일에도 강제 발송'
+        description: 'KST 일·월요일에도 강제 발송 (수동 실행은 즉시 발송)'
         type: boolean
         default: false
+
+concurrency:
+  group: daily-briefing
+  cancel-in-progress: false
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - id: day
+        run: echo "d=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
+
+      - id: sent
+        if: github.event_name == 'schedule'
+        uses: actions/cache/restore@v4
+        with:
+          path: .sent
+          key: briefing-sent-${{ steps.day.outputs.d }}
+          lookup-only: true
+
+      - if: steps.sent.outputs.cache-hit == 'true'
+        run: echo "오늘(${{ steps.day.outputs.d }}) 이미 발송됨 → 종료"
+
+      - if: steps.sent.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+
+      - if: steps.sent.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests matplotlib
-      - run: python check_feargreed.py
+
+      - if: steps.sent.outputs.cache-hit != 'true'
+        run: |
+          (sudo apt-get update -qq && sudo apt-get install -y -qq fonts-inter) || echo "Inter 설치 실패 → 기본 폰트 사용"
+          pip install -q requests matplotlib
+
+      - if: steps.sent.outputs.cache-hit != 'true'
+        run: python check_feargreed.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FORCE_SEND: ${{ github.event.inputs.force }}
+          SCHEDULED: ${{ github.event_name == 'schedule' }}
+          SENT_MARKER: .sent/done
+
+      - if: github.event_name == 'schedule' && hashFiles('.sent/done') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .sent
+          key: briefing-sent-${{ steps.day.outputs.d }}
