@@ -51,7 +51,7 @@ jobs:
 
       - if: steps.sent.outputs.cache-hit != 'true'
         run: |
-          (sudo apt-get update -qq && sudo apt-get install -y -qq fonts-inter) || echo "Inter 설치 실패 → 기본 폰트 사용"
+          (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends fonts-noto-cjk) || echo "한글 폰트 설치 실패 → 텍스트 발송"
           pip install -q requests matplotlib
 
       - if: steps.sent.outputs.cache-hit != 'true'
