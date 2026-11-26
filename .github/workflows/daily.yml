@@ -2,8 +2,15 @@ name: Daily Check
 
 on:
   schedule:
-    - cron: '30 20 * * *'
+    # 20:30 UTC = 다음날 05:30 KST
+    # UTC 월~금 실행 → KST 화~토 발송 (KST 일·월 = 미국 토·일 미개장 → 제외)
+    - cron: '30 20 * * 1-5'
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'KST 일·월요일에도 강제 발송'
+        type: boolean
+        default: false
 
 jobs:
   check:
@@ -13,8 +20,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests
+      - run: pip install requests matplotlib
       - run: python check_feargreed.py
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FORCE_SEND: ${{ github.event.inputs.force }}
